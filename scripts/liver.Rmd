@@ -1,0 +1,441 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r warning=FALSE}
+library(readxl)
+library(dplyr)
+library(ggplot2)
+library(reshape)
+library(pheatmap)
+library(gridExtra)
+library(grid)
+library(cowplot)
+library(ggrepel)
+library(hexbin)
+library(readr)
+library(vsn)
+library(limma)
+library(progeny)
+library(tibble)
+library(dorothea)
+library(staplr)
+library(ggrepel)
+library(patchwork)
+library(grid)
+library(limma)
+library(UpSetR)
+library(RColorBrewer)
+library(msigdbr)
+library(fgsea)
+library(clusterProfiler)
+library(umap)
+library(data.table)
+source("support_functions.R")
+```
+
+```{r}
+# Load xlsl file, skip metadata header
+df1 <- read.csv("../data/raw/liver/counts_1.csv", sep = ';') %>% 
+  #Filter based on metadata
+  column_to_rownames('gene') %>% select(-L2,-L7,-L21,-L22, -L9, -L14, -L16) 
+df2 <- read.csv("../data/raw/liver/counts_2.csv", sep = ';') %>% 
+  column_to_rownames('gene')
+
+df <- bind_cols(df1, df2) %>% select(order(colnames(.)))
+rm(df1)
+rm(df2)
+gc()
+gene_names <- rownames(df)
+
+#We remove rows that contain only 0
+msk <- rowSums(df) > 0
+df <- df[msk,]
+gene_names <- gene_names[msk]
+#remaining 0 have to be made as NA so that log2 transformation is possible
+df[df == 0] <- NA
+
+rownames(df) <- gene_names
+get_violins <- function(tdf){
+  melted_df <- reshape::melt(log2(df))
+  index <- c(1:length(melted_df[,1]))
+  violins <- ggplot(melted_df, aes(x = index, y = value, group = variable, color = variable)) + geom_violin() + theme_minimal() + geom_hline(yintercept = 4, linetype="dashed")
+}
+violins <- get_violins(df)
+```
+
+```{r}
+# Load extra data used during all the analysis
+# Metadata
+meta <- read_csv("../data/raw/liver/meta.csv", col_names = T) %>% 
+  arrange(sample)
+
+# Limma
+TS <- paste(meta$COVID, meta$PCR, sep=".")
+TS <- factor(TS)
+levels(TS) <- c("n.n", "p.n", "p.p")
+
+# GSE
+canonical_set <- readRDS(file.path('..', 'data', 
+                                   'Genesets_Dec19.rds'))$MSIGDB_CANONICAL
+
+can_attr <- attributes(canonical_set)[["names"]]
+# Remove pathways that are TFs
+msk <- lapply(can_attr, function(c){
+  !(c %like% "TF")
+}) %>% unlist()
+
+canonical_set <- canonical_set[msk]
+
+
+msigdbr_df <- msigdbr(species = "Homo sapiens", category = "C2") %>% 
+                select(gs_name, gs_description) %>%
+                unique() %>% column_to_rownames('gs_name')
+
+progeny_model <- progeny::getModel() %>% 
+  as_tibble(rownames = "id") %>% column_to_rownames('id')
+```
+
+```{r}
+dir <- 'liver'
+run_normalize(df, dir)
+run_tf(dir)
+run_pathway(dir)
+```
+```{r}
+ts_labels <- TS
+levels(ts_labels) <- c("COVID-/PCR-", "COVID+/PCR-", "COVID+/PCR+")
+
+input_pca <- read_csv(file.path('..', 'results', 'liver', 'count_df_vsn.csv')) %>%
+  column_to_rownames('gene') %>% as.matrix()
+input_pca[is.na(input_pca)] <- 0
+pca_r <- prcomp(t(input_pca), center = TRUE, scale. = T)
+pca_df <- pca_r$x %>% as_tibble(rownames = "samples") %>% mutate(type=ts_labels)
+pca_plot <- pca_df %>% 
+  ggplot() + geom_point(aes(x = PC1, y = PC2, 
+                          color = type)) +
+  geom_text_repel(aes(x = PC1, y = PC2, 
+                          label = samples, color=type),show.legend = F) +
+  theme_classic() + ggtitle('PCA') + theme(text = element_text(size=20))
+
+custom.config = umap.defaults
+custom.config$random_state = 123
+proj.umap = umap(t(input_pca), config=custom.config)
+umap_df <- proj.umap[["layout"]]
+colnames(umap_df) <- c('UMAP1', 'UMAP2')
+umap_df <- umap_df %>% as_tibble() %>% mutate(type=ts_labels, samples=rownames(umap_df))
+umap_plot <- umap_df %>% 
+  ggplot() + geom_point(aes(x = UMAP1, y = UMAP2, 
+                          color = type)) +
+  geom_text_repel(aes(x = UMAP1, y = UMAP2, 
+                          label = samples, color=type), show.legend = F) +
+  theme_classic() + ggtitle('UMAP') + theme(text = element_text(size=20))
+```
+
+
+
+
+```{r}
+#TFs plots
+dir <- file.path('..', 'results', 'liver')
+# Build lima model
+design <- model.matrix(~0+TS)
+colnames(design) <- levels(TS)
+eset <- read_csv(file.path(dir, 'tf_act.csv')) %>%
+  column_to_rownames('tf')
+fit <- lmFit(eset, design)
+cont.matrix <- makeContrasts(
+  pvsninn=p.n-n.n,
+  pvsninp=p.p-n.n,
+  Diff=(p.p-n.n)-(p.n-n.n),
+  levels=design)
+fit2 <- contrasts.fit(fit, cont.matrix)
+model <- eBayes(fit2)
+
+t_names <- model$coefficients %>% colnames()
+sig_lst <- lapply(t_names, function(t_name){
+    df_plot <- get_plot_df(model, t_name) %>% filter(thr == 'sign') %>% 
+      select(func) %>% unlist()
+  })
+
+# Write tfs to file
+tf_to_file <- lapply(t_names, function(t_name){
+  get_plot_df(model, t_name) %>% filter(thr == 'sign') %>% 
+    select(-thr) %>%
+    mutate(order=t_name) %>%
+    rename('comp'=order) %>%
+    mutate(comp=ifelse(comp == 'pvsninn', 'COVID+/PCR-', comp)) %>%
+    mutate(comp=ifelse(comp == 'pvsninp', 'COVID+/PCR+', comp))
+}) %>% bind_rows()
+write_csv(tf_to_file, file.path(dir, 'sign_tfs.csv'))
+
+listInput <- list('COVID+/PCR-' = sig_lst[[1]], 'COVID+/PCR+' = sig_lst[[2]], 
+                  Difference = sig_lst[[3]])
+
+tf_upset <- upset(fromList(listInput), order.by = "freq", 
+      mainbar.y.label = "Significant TFs Intersections",
+      sets.x.label = "TFs Per Comparison",
+      point.size = 4, line.size = 1.5,
+      text.scale=c(2, 2, 2, 2, 2, 2))
+
+tf_volcano <- wrap_plots(limma_volcano(model), ncol = 3, nrow = 1)
+
+# Select only the significant TFs of the Difference comparison
+ht_df <- eset[sig_lst[[3]],]
+
+idx <- order(TS) # order samples
+idx_func <- order(rowMeans(ht_df[,TS == 'p.p'])) #order TFs by p.p
+ht_all_df <- as.matrix(ht_df[idx_func,idx])
+
+gaps_row <- rle(c(sort(TS)))$lengths[1:2]
+gaps_row <- c(gaps_row[1], sum(gaps_row))
+
+max_num <- max(abs(ht_all_df))
+tf_samples_ht <- pheatmap(t(ht_all_df), cluster_row = FALSE, cluster_col = FALSE,
+         gaps_row=gaps_row, main='TF activity per sample', 
+         fontsize = 17, fontsize_row = 12, fontsize_col = 12,
+         breaks = unique(seq(-max_num, max_num, length.out=100)))
+
+mean_ht <- tibble(
+  func=rownames(ht_df),
+  Healthy=rowMeans(ht_df[,TS == 'n.n']),
+  `PCR-`=rowMeans(ht_df[,TS == 'p.n']),
+  `PCR+`=rowMeans(ht_df[,TS == 'p.p'])
+) %>% column_to_rownames('func') %>% arrange(`PCR+`)
+
+max_num <- max(abs(mean_ht))
+tf_heatmap <- pheatmap(t(as.matrix(mean_ht)), cluster_row = FALSE, cluster_col = FALSE, 
+         gaps_row=c(1,2,3), cellheight = 50, main='Mean TF activity', 
+         fontsize = 17, fontsize_row = 12, fontsize_col = 12,
+         breaks = unique(seq(-max_num, max_num, length.out=100)))
+
+# Run GSE for positive and negative TFs
+pos_tfs <- get_plot_df(model, 'Diff') %>% 
+      filter(thr == 'sign', coef >= 0.0) %>% 
+      select(func) %>% unlist() %>% unname()
+
+tf_pos_union_genes <- lapply(pos_tfs, function(func_name){
+  list_genes <- dorothea_hs %>% 
+    dplyr::filter(confidence %in% c("A", "B","C")) %>%
+    filter(tf==func_name) %>% select(target) %>% unlist()
+}) %>% unlist() %>% unname() %>% unique()
+
+neg_tfs <- get_plot_df(model, 'Diff') %>% 
+      filter(thr == 'sign', coef < 0.0) %>% 
+      select(func) %>% unlist() %>% unname()
+
+tf_neg_union_genes <- lapply(neg_tfs, function(func_name){
+  list_genes <- dorothea_hs %>% 
+    dplyr::filter(confidence %in% c("A", "B","C")) %>%
+    filter(tf==func_name) %>% select(target) %>% unlist()
+}) %>% unlist() %>% unname() %>% unique()
+
+pos_enrchr <- GSE_analysis(geneList = tf_pos_union_genes, 
+                           Annotation_DB = canonical_set) %>% 
+                arrange(corr_p_value) %>% head(15) %>%
+                mutate(Direction='+') %>% mutate(desc=msigdbr_df[gset,])
+neg_enrchr <- GSE_analysis(geneList = tf_neg_union_genes, 
+                           Annotation_DB = canonical_set) %>% 
+                arrange(corr_p_value) %>% head(5) %>% arrange(-corr_p_value) %>%
+                mutate(Direction='-') %>% mutate(desc=msigdbr_df[gset,])
+df_enrchr <- rbind(pos_enrchr, neg_enrchr) %>% 
+  mutate(desc=ifelse(is.na(desc), gset, desc)) %>% rowid_to_column('id') %>%
+  mutate(id=factor(id))
+
+
+# Plot enrichment
+df_enrchr$Direction <- factor(df_enrchr$Direction, levels =c("+", "-"))
+
+
+tf_enrich <- ggplot(data=df_enrchr, aes(x=-log10(corr_p_value), y=id, 
+                           color=Direction, fill=Direction)) +
+  geom_bar(stat="identity") +
+  geom_vline(xintercept =-log10(0.05), linetype="dashed") +
+  ylab("Canonical pathways description") +
+  theme_classic() +
+    theme(text = element_text(size=15)) + 
+  scale_y_discrete(labels=c(df_enrchr$desc))
+```
+
+```{r}
+#Pathway plots
+dir <- file.path('..', 'results', 'liver')
+# Build lima model
+design <- model.matrix(~0+TS)
+colnames(design) <- levels(TS)
+eset <- read_csv(file.path(dir, 'pw_act.csv')) %>%
+  column_to_rownames('pathway')
+fit <- lmFit(eset, design)
+cont.matrix <- makeContrasts(
+  pvsninn=p.n-n.n,
+  pvsninp=p.p-n.n,
+  Diff=(p.p-n.n)-(p.n-n.n),
+  levels=design)
+fit2 <- contrasts.fit(fit, cont.matrix)
+model <- eBayes(fit2)
+
+t_names <- model$coefficients %>% colnames()
+sig_lst <- lapply(t_names, function(t_name){
+    df_plot <- get_plot_df(model, t_name) %>% filter(thr == 'sign') %>% 
+      select(func) %>% unlist()
+  })
+
+# Write tfs to file
+pw_to_file <- lapply(t_names, function(t_name){
+  get_plot_df(model, t_name) %>% filter(thr == 'sign') %>% 
+    select(-thr) %>%
+    mutate(order=t_name) %>%
+    rename('comp'=order) %>%
+    mutate(comp=ifelse(comp == 'pvsninn', 'COVID+/PCR-', comp)) %>%
+    mutate(comp=ifelse(comp == 'pvsninp', 'COVID+/PCR+', comp))
+}) %>% bind_rows()
+write_csv(pw_to_file, file.path(dir, 'sign_pws.csv'))
+
+listInput <- list('COVID+/PCR-' = sig_lst[[1]], 'COVID+/PCR+' = sig_lst[[2]], 
+                  Difference = sig_lst[[3]])
+
+pw_upset <- upset(fromList(listInput), order.by = "freq", 
+      mainbar.y.label = "Sign. Path. Intersections",
+      sets.x.label = "Path. Per Comparison",
+      point.size = 4, line.size = 1.5,
+      text.scale=c(2, 2, 2, 2, 2, 2))
+
+pw_volcano <- wrap_plots(limma_volcano(model), ncol = 3, nrow = 1)
+
+# Select only the significant TFs of the Difference comparison
+ht_df <- eset[sig_lst[[3]],]
+
+idx <- order(TS) # order samples
+idx_func <- order(rowMeans(ht_df[,TS == 'p.p'])) #order TFs by p.p
+
+ht_all_df <- as.matrix(ht_df[idx_func,idx])
+
+gaps_row <- rle(c(sort(TS)))$lengths[1:2]
+gaps_row <- c(gaps_row[1], sum(gaps_row))
+
+max_num <- max(abs(ht_all_df))
+pw_samples_ht <- pheatmap(t(ht_all_df), cluster_row = FALSE, cluster_col = FALSE,
+         gaps_row=gaps_row, main='Pathway activity per sample', 
+         fontsize = 17, fontsize_row = 12, fontsize_col = 12, cellwidth = 40,
+         breaks = unique(seq(-max_num, max_num, length.out=100)))
+
+mean_ht <- tibble(
+  func=rownames(ht_df),
+  Healthy=rowMeans(ht_df[,TS == 'n.n']),
+  `PCR-`=rowMeans(ht_df[,TS == 'p.n']),
+  `PCR+`=rowMeans(ht_df[,TS == 'p.p'])
+) %>% column_to_rownames('func') %>% arrange(`PCR+`)
+
+max_num <- max(abs(mean_ht))
+pw_heatmap <- pheatmap(t(as.matrix(mean_ht)), cluster_row = FALSE, cluster_col = FALSE, 
+         gaps_row=c(1,2,3), cellheight = 50, main='Mean Pathway activity', 
+         fontsize = 17, fontsize_row = 12, fontsize_col = 12, cellwidth = 60,
+         breaks = unique(seq(-max_num, max_num, length.out=100)))
+
+# Run GSE for positive and negative pathwayss
+pos_pws <- get_plot_df(model, 'Diff') %>% 
+      filter(thr == 'sign', coef >= 0.0) %>% 
+      select(func) %>% unlist() %>% unname()
+
+pw_pos_union_genes <- lapply(pos_pws, function(func_name){
+  list_genes <- progeny_model %>% select(func_name) %>% 
+    filter(func_name != 0) %>% rownames()
+}) %>% unlist() %>% unname() %>% unique()
+
+neg_pws <- get_plot_df(model, 'Diff') %>% 
+      filter(thr == 'sign', coef < 0.0) %>% 
+      select(func) %>% unlist() %>% unname()
+
+pw_neg_union_genes <- lapply(neg_pws, function(func_name){
+  list_genes <- progeny_model %>% select(func_name) %>% 
+    filter(!!as.symbol(func_name) != 0) %>% rownames()
+}) %>% unlist() %>% unname() %>% unique()
+
+pos_enrchr <- GSE_analysis(geneList = pw_pos_union_genes, 
+                           Annotation_DB = canonical_set) %>% 
+                arrange(corr_p_value) %>% head(5) %>%
+                mutate(Direction='+') %>% mutate(desc=msigdbr_df[gset,])
+neg_enrchr <- GSE_analysis(geneList = pw_neg_union_genes, 
+                           Annotation_DB = canonical_set) %>% 
+                arrange(corr_p_value) %>% head(5) %>% arrange(-corr_p_value) %>%
+                mutate(Direction='-') %>% mutate(desc=msigdbr_df[gset,])
+df_enrchr <- rbind(pos_enrchr, neg_enrchr) %>% 
+  mutate(desc=ifelse(is.na(desc), gset, desc)) %>% rowid_to_column('id') %>%
+  mutate(id=factor(id))
+
+# Plot enrichment
+df_enrchr$Direction <- factor(df_enrchr$Direction, levels =c("+", "-"))
+
+
+pw_enrich <- ggplot(data=df_enrchr, aes(x=-log10(corr_p_value), y=id, 
+                           color=Direction, fill=Direction)) +
+  geom_bar(stat="identity") +
+  geom_vline(xintercept =-log10(0.05), linetype="dashed") +
+  ylab("Canonical pathways description") +
+  theme_classic() +
+    theme(text = element_text(size=15)) + 
+  scale_y_discrete(labels=c(df_enrchr$desc))
+```
+
+```{r}
+# Shared GSE, TFs + Paths
+pos_union_genes <- union(tf_pos_union_genes, pw_pos_union_genes)
+neg_union_genes <- union(tf_neg_union_genes, pw_neg_union_genes)
+
+pos_enrchr <- GSE_analysis(geneList = pos_union_genes, 
+                           Annotation_DB = canonical_set) %>% 
+                arrange(corr_p_value) %>% head(15) %>%
+                mutate(Direction='+') %>% mutate(desc=msigdbr_df[gset,])
+neg_enrchr <- GSE_analysis(geneList = neg_union_genes, 
+                           Annotation_DB = canonical_set) %>% 
+                arrange(corr_p_value) %>% head(10) %>% arrange(-corr_p_value) %>%
+                mutate(Direction='-') %>% mutate(desc=msigdbr_df[gset,])
+df_enrchr <- rbind(pos_enrchr, neg_enrchr) %>% 
+  mutate(desc=ifelse(is.na(desc), gset, desc)) %>% rowid_to_column('id') %>%
+  mutate(id=factor(id))
+
+# Plot enrichment
+df_enrchr$Direction <- factor(df_enrchr$Direction, levels =c("+", "-"))
+
+p_enrich <- ggplot(data=df_enrchr, aes(x=-log10(corr_p_value), y=id, 
+                           color=Direction, fill=Direction)) +
+  geom_bar(stat="identity") +
+  geom_vline(xintercept =-log10(0.05), linetype="dashed") +
+  ylab("Canonical pathways description") +
+  theme_classic() +
+    theme(text = element_text(size=15)) + 
+  scale_y_discrete(labels=c(df_enrchr$desc))
+```
+
+
+```{r}
+pdf(file = file.path(dir, "plots.pdf"),
+    width = 10, # The width of the plot in inches
+    height = 6) # The height of the plot in inches
+violins
+pca_plot
+umap_plot
+
+tf_volcano
+tf_upset
+plot.new()
+tf_samples_ht
+plot.new()
+tf_heatmap
+tf_enrich
+
+pw_volcano
+pw_upset
+plot.new()
+pw_samples_ht
+plot.new()
+pw_heatmap
+pw_enrich
+
+p_enrich
+dev.off()
+```
+
+
+

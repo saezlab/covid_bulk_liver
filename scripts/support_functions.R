@@ -956,9 +956,9 @@ limma_volcano <- function(model){
     x + coord_cartesian(xlim = c(-max_x, max_x), 
                         ylim = c(0, max_y))
   })
-  p[[1]] <- p[[1]] + ggtitle('COVID+/PCR- vs COVID-/PCR-')
-  p[[2]] <- p[[2]] + ggtitle('COVID+/PCR+ vs COVID-/PCR-')
-  p[[3]] <- p[[3]] + ggtitle('Difference')
+  #p[[1]] <- p[[1]] + ggtitle('COVID+/PCR- vs COVID-/PCR-')
+  #p[[2]] <- p[[2]] + ggtitle('COVID+/PCR+ vs COVID-/PCR-')
+  #p[[3]] <- p[[3]] + ggtitle('Difference')
   return(p)
 }
 

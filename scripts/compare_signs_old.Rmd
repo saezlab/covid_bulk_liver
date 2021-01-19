@@ -1,0 +1,464 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r warning=FALSE}
+library(org.Hs.eg.db)
+#library(EnsDb.Hsapiens.v86)
+library(annotate)
+library(readxl)
+library(dplyr)
+library(ggplot2)
+library(reshape)
+library(pheatmap)
+library(gridExtra)
+library(grid)
+library(cowplot)
+library(ggrepel)
+library(hexbin)
+library(readr)
+library(vsn)
+library(limma)
+library(progeny)
+library(tibble)
+library(dorothea)
+library(staplr)
+library(ggrepel)
+library(patchwork)
+library(grid)
+library(limma)
+library(UpSetR)
+library(RColorBrewer)
+library(msigdbr)
+library(fgsea)
+library(clusterProfiler)
+library(umap)
+library(data.table)
+library(tidyverse)
+library(ggsignif)
+source("support_functions.R")
+```
+
+Generate signature Hepatotropic viruses
+
+```{r}
+dir <- 'HCV'
+
+fname <- 'GSE84346_annotation.xlsx'
+meta <- read_xlsx(file.path('..', 'data', dir, fname)) %>%
+  dplyr::select(SAMPLE, endogenous_ifn) %>% 
+  rename('sample'=SAMPLE, 'ifn'=endogenous_ifn) %>%
+  mutate(ifn=gsub(" ", "", ifn)) %>%
+  mutate(ifn=ifelse(ifn == 'NA', "healthy", ifn)) %>%
+  #dplyr::filter(ifn != 'low ISG') %>%
+  arrange(sample)
+
+fname <- 'GSE84346_log2RPKM.xlsx'
+df <- read_xlsx(file.path('..', 'data', dir, fname))
+df$gene <- getSYMBOL(df$entrezid, data='org.Hs.eg') %>% unlist() %>% unname
+df <- df %>% dplyr::filter(!is.na(gene)) %>% 
+  dplyr::select(-entrezid) %>%
+  dplyr::select(gene, meta$sample)
+
+gene_names <- rownames(df)
+
+path <- file.path("..", "results", dir)
+dir.create(path, showWarnings = FALSE, recursive = T)
+write_csv(df, file.path(path, "count_df_vsn.csv"))
+run_tf(dir)
+
+# Compute disease score
+covid_tfs <- read_csv(file.path('..','results','liver','sign_tfs.csv')) %>%
+  filter(pvals < 0.05, comp=='Diff') %>% select(func, coef) %>% 
+  column_to_rownames('func')
+
+tf_act_m <- read_csv(file.path('..','results',dir,'tf_act.csv')) %>%
+  column_to_rownames('tf')
+
+tf_act_m <- as.matrix(tf_act_m[rownames(covid_tfs),])
+
+dscore <- unlist(covid_tfs) %*% tf_act_m %>% as_tibble()
+dscore <- dscore %>% pivot_longer(colnames(dscore))
+dscore$value <- (dscore$value - mean(dscore$value)) / sd(dscore$value)
+dscore$name <- factor(meta$ifn, levels = c("healthy", "lowISG", "highISG"))
+
+hcv_score <- ggplot(dscore, aes(x=name, y=value, fill=name)) +
+  geom_boxplot()
+```
+
+```{r}
+dir <- 'HEV'
+
+fname <- 'GSE135619_annotation.xlsx'
+meta <- read_xlsx(file.path('..', 'data', dir, fname)) %>% 
+  dplyr::filter(V4=='PBS') %>% 
+  rename('sample'=V0, 'type'=V6) %>% 
+  dplyr::select(sample, type) %>%
+  arrange(sample)
+
+fname <- 'GSE135619_log2TPM.xlsx'
+df <- read_xlsx(file.path('..', 'data', dir, fname))
+df$gene <- getSYMBOL(df$entrezid, data='org.Hs.eg') %>% unlist() %>% unname
+df <- df %>% dplyr::filter(!is.na(gene)) %>% 
+  dplyr::select(-entrezid) %>%
+  dplyr::select(gene, meta$sample)
+
+gene_names <- rownames(df)
+
+path <- file.path("..", "results", dir)
+dir.create(path, showWarnings = FALSE, recursive = T)
+write_csv(df, file.path(path, "count_df_vsn.csv"))
+run_tf(dir)
+
+# Compute disease score
+covid_tfs <- read_csv(file.path('..','results','liver','sign_tfs.csv')) %>%
+  filter(pvals < 0.05, comp=='Diff') %>% select(func, coef) %>% 
+  column_to_rownames('func')
+
+tf_act_m <- read_csv(file.path('..','results',dir,'tf_act.csv')) %>%
+  column_to_rownames('tf')
+tf_act_m <- as.matrix(tf_act_m[rownames(covid_tfs),])
+
+tf_act_m_covid <- read_csv(file.path('..','results','liver','tf_act.csv')) %>%
+  column_to_rownames('tf') %>% select(L1, L4, L5, L6, L9, L12, L13)
+tf_act_m_covid <- as.matrix(tf_act_m_covid[rownames(covid_tfs),])
+
+tf_act_m <- cbind(tf_act_m, tf_act_m_covid)
+
+dscore <- unlist(covid_tfs) %*% tf_act_m %>% as_tibble()
+dscore <- dscore %>% pivot_longer(colnames(dscore))
+dscore$value <- (dscore$value - mean(dscore$value)) / sd(dscore$value)
+dscore$name <- factor(c(meta$type, "COVID", "COVID","COVID","COVID","COVID","COVID","COVID"), 
+levels = c("earlyControl", "lateControl", "earlyHEV", "lateHEV", "COVID"))
+
+hev_score <- ggplot(dscore, aes(x=name, y=value, fill=name)) +
+  geom_boxplot()
+```
+
+```{r}
+# Get COVID signature
+covid_sign <- read_csv(file.path('..','results','liver','sign_tfs.csv')) %>%
+  filter(pvals < 0.05, comp=='Diff') %>% select(func, coef) %>% 
+  column_to_rownames('func')
+
+# Open all TFs act and concatenate them
+tf_act_m <- read_csv(file.path('..','results','liver','tf_act.csv')) %>%
+  column_to_rownames('tf')
+tf_act_m <- as.matrix(tf_act_m[rownames(covid_sign),])
+
+#HEV
+temp_m <- read_csv(file.path('..','results','HEV','tf_act.csv')) %>%
+  column_to_rownames('tf')
+temp_m <- as.matrix(temp_m[rownames(covid_sign),])
+tf_act_m <- cbind(tf_act_m, temp_m)
+
+#HCV
+temp_m <- read_csv(file.path('..','results','HCV','tf_act.csv')) %>%
+  column_to_rownames('tf')
+temp_m <- as.matrix(temp_m[rownames(covid_sign),])
+tf_act_m <- cbind(tf_act_m, temp_m)
+
+# Concatenate metas
+meta <- read_csv("../data/raw/liver/meta.csv", col_names = T) %>% 
+  arrange(sample) %>% mutate(COVID=ifelse(COVID=='p', 'COVID+', 'COVID-'),
+                             PCR=ifelse(PCR=='p', 'PCR+', 'PCR-')) %>%
+  mutate(type=paste(COVID, PCR, sep="/")) %>%
+  dplyr::select(sample, type) %>% mutate(group='COVID')
+
+temp_meta <- read_xlsx(file.path('..', 'data', 'HEV', 'GSE135619_annotation.xlsx')) %>%
+  dplyr::filter(V4=='PBS') %>% 
+  rename('sample'=V0, 'type'=V6) %>% 
+  dplyr::select(sample, type) %>%
+  arrange(sample) %>% mutate(group='HEV')
+
+meta <- rbind(meta, temp_meta)
+
+temp_meta <- read_xlsx(file.path('..', 'data', 'HCV', 'GSE84346_annotation.xlsx')) %>%
+  dplyr::select(sample, type) %>% 
+  arrange(sample) %>% mutate(group='HCV')
+meta <- rbind(meta, temp_meta)
+
+meta$type <- factor(meta$type, levels = c('COVID-/PCR-',
+                                          'HEV-/early',
+                                          'HCV-',
+                                          'HEV-/late',
+                                          'HCV+/low',
+                                          'HEV+/early',
+                                          'COVID+/PCR-',
+                                          'HEV+/late',
+                                          'HCV+/high',
+                                          'COVID+/PCR+'))
+
+# Compute scores
+dscore <- unlist(covid_sign) %*% tf_act_m %>% as_tibble()
+dscore <- dscore %>% pivot_longer(colnames(dscore))
+dscore$value <- (dscore$value - mean(dscore$value)) / sd(dscore$value)
+dscore$name <- meta$type
+dscore$group <- meta$group
+
+plot_scores_hev <- ggplot(filter(dscore, dscore$group == "HEV"), 
+                          aes(x=name, y=value, fill=group)) + 
+  geom_boxplot(show.legend = FALSE) + 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  geom_signif(comparisons = list(c("HEV-/early", "HEV-/late")), 
+              map_signif_level=TRUE, y_position=0.5, test="wilcox.test") +
+  geom_signif(comparisons = list(c("HEV-/early", "HEV+/early")), 
+              map_signif_level=TRUE, y_position=0.75, test="wilcox.test") +
+  geom_signif(comparisons = list(c("HEV-/early", "HEV+/late")), 
+              map_signif_level=TRUE, y_position=1.0, test="wilcox.test") +
+  geom_signif(comparisons = list(c("HEV-/late", "HEV+/early")), 
+              map_signif_level=TRUE, y_position=1.25, test="wilcox.test") +
+  geom_signif(comparisons = list(c("HEV-/late", "HEV+/late")), 
+              map_signif_level=TRUE, y_position=1.5, test="wilcox.test") +
+  geom_signif(comparisons = list(c("HEV+/early", "HEV+/late")), 
+              map_signif_level=TRUE, y_position=1.75, test="wilcox.test") +
+  ylab('Disease score') + xlab('') + ggtitle('HEV') +
+  ylim(-3, 3)
+
+plot_scores_hcv <- ggplot(filter(dscore, dscore$group == "HCV"), 
+                          aes(x=name, y=value, fill=group)) + 
+  geom_boxplot(show.legend = FALSE, fill="#7CAE00") + 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  geom_signif(comparisons = list(c("HCV-", "HCV+/low")), 
+              map_signif_level=TRUE, y_position=2.25, test="wilcox.test") +
+  geom_signif(comparisons = list(c("HCV+/low", "HCV+/high")), 
+              map_signif_level=TRUE, y_position=2.50, test="wilcox.test") + 
+  geom_signif(comparisons = list(c("HCV-", "HCV+/high")), 
+              map_signif_level=TRUE, y_position=2.75, test="wilcox.test") +
+  ylab('') + xlab('') + ggtitle('HCV') +
+  ylim(-3, 3)
+
+plot_scores_covid <- ggplot(filter(dscore, dscore$group == "COVID"), 
+                          aes(x=name, y=value, fill=group)) + 
+  geom_boxplot(show.legend = FALSE, fill="#00BFC4") + 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + 
+  geom_signif(comparisons = list(c("COVID-/PCR-", "COVID+/PCR-")), 
+              map_signif_level=TRUE, test="wilcox.test") +
+  geom_signif(comparisons = list(c("COVID+/PCR-", "COVID+/PCR+")), 
+              map_signif_level=TRUE, y_position=1.75, test="wilcox.test") +
+  geom_signif(comparisons = list(c("COVID-/PCR-", "COVID+/PCR+")), 
+              map_signif_level=TRUE, y_position=2.00, test="wilcox.test") +
+  ylab('') + xlab('') + ggtitle('COVID') +
+  ylim(-3, 3)
+
+plot_scores_hev + plot_scores_hcv + plot_scores_covid +
+  plot_annotation(title="Disease scores")
+```
+
+```{r}
+cos_sim <- function(a,b){
+  sim <- (a %*% b) / (sqrt(sum(a^2)) * sqrt(sum(b^2)))
+  return(sim)
+}
+
+sims <- sapply(1:ncol(tf_act_m),function(i) cos_sim(tf_act_m[,i],unlist(covid_sign))) %>%
+  as_tibble()
+sims$name <- dscore$name
+sims$group <- meta$group
+
+plot_sims_hev <- ggplot(filter(sims, dscore$group == "HEV"), 
+                          aes(x=name, y=value, fill=group)) + 
+  geom_boxplot(show.legend = FALSE) + 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  geom_signif(comparisons = list(c("HEV-/early", "HEV-/late")), 
+              map_signif_level=TRUE, y_position=0.5, test="wilcox.test") +
+  geom_signif(comparisons = list(c("HEV-/early", "HEV+/early")), 
+              map_signif_level=TRUE, y_position=0.6, test="wilcox.test") +
+  geom_signif(comparisons = list(c("HEV-/early", "HEV+/late")), 
+              map_signif_level=TRUE, y_position=0.7, test="wilcox.test") +
+  geom_signif(comparisons = list(c("HEV-/late", "HEV+/early")), 
+              map_signif_level=TRUE, y_position=0.8, test="wilcox.test") +
+  geom_signif(comparisons = list(c("HEV-/late", "HEV+/late")), 
+              map_signif_level=TRUE, y_position=0.9, test="wilcox.test") +
+  geom_signif(comparisons = list(c("HEV+/early", "HEV+/late")), 
+              map_signif_level=TRUE, y_position=1.0, test="wilcox.test") +
+  ylab('Cosine similarity') + xlab('') + ggtitle('HEV') +
+  ylim(-1, 1)
+
+plot_sims_hcv <- ggplot(filter(sims, dscore$group == "HCV"), 
+                          aes(x=name, y=value, fill="#7CAE00")) + 
+  geom_boxplot(show.legend = FALSE, fill="#7CAE00") + 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  geom_signif(comparisons = list(c("HCV-", "HCV+/low")), 
+              map_signif_level=TRUE, y_position=0.8, test="wilcox.test") +
+  geom_signif(comparisons = list(c("HCV+/low", "HCV+/high")), 
+              map_signif_level=TRUE, y_position=0.9, test="wilcox.test") + 
+  geom_signif(comparisons = list(c("HCV-", "HCV+/high")), 
+              map_signif_level=TRUE, y_position=1.00, test="wilcox.test") +
+  ylab('') + xlab('') + ggtitle('HCV') +
+  ylim(-1, 1)
+
+plot_sims_covid <- ggplot(filter(sims, dscore$group == "COVID"), 
+                          aes(x=name, y=value, fill="#00BFC4")) + 
+  geom_boxplot(show.legend = FALSE, fill="#00BFC4") + 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  geom_signif(comparisons = list(c("COVID-/PCR-", "COVID+/PCR-")), 
+              map_signif_level=TRUE, y_position=0.8, test="wilcox.test") +
+  geom_signif(comparisons = list(c("COVID+/PCR-", "COVID+/PCR+")), 
+              map_signif_level=TRUE, y_position=0.9, test="wilcox.test") +
+  geom_signif(comparisons = list(c("COVID-/PCR-", "COVID+/PCR+")), 
+              map_signif_level=TRUE, y_position=1.00, test="wilcox.test") +
+  ylab('') + xlab('') + ggtitle('COVID') +
+  ylim(-1, 1)
+
+plot_sims_hev + plot_sims_hcv + plot_sims_covid + 
+  plot_annotation(title="Cosine similarities")
+```
+
+```{r}
+# Plot heatmap all modes TF mean
+mean_ht <- tibble(
+  func=rownames(tf_act_m),
+  `HEV-/early`=rowMeans(tf_act_m[,meta$type == 'HEV-/early']),
+  `HEV-/late`=rowMeans(tf_act_m[,meta$type == 'HEV-/late']),
+  `HEV+/early`=rowMeans(tf_act_m[,meta$type == 'HEV+/early']),
+  `HEV+/late`=rowMeans(tf_act_m[,meta$type == 'HEV+/late']),
+  `HCV-`=rowMeans(tf_act_m[,meta$type == 'HCV-']),
+  `HCV+/low`=rowMeans(tf_act_m[,meta$type == 'HCV+/low']),
+  `HCV+/high`=rowMeans(tf_act_m[,meta$type == 'HCV+/high']),
+  `COVID-/PCR-`=rowMeans(tf_act_m[,meta$type == 'COVID-/PCR-']),
+  `COVID+/PCR-`=rowMeans(tf_act_m[,meta$type == 'COVID+/PCR-']),
+  `COVID+/PCR+`=rowMeans(tf_act_m[,meta$type == 'COVID+/PCR+']),
+) %>% column_to_rownames('func') %>% arrange(`COVID+/PCR+`)
+
+cos_sim(unlist(mean_ht$`COVID+/PCR-`), unlist(mean_ht$`COVID+/PCR+`))
+
+cos_sims <- lapply(colnames(mean_ht), function(col){
+  cos_sim(unlist(mean_ht[,col]), unlist(mean_ht$`COVID+/PCR+`))
+}) %>% unlist()
+
+mean_ht <-rbind('Cos Sim'=cos_sims, mean_ht)
+
+mean_ht <- as.matrix(mean_ht)[,order(cos_sims)]
+
+
+max_num <- max(abs(mean_ht))
+tf_heatmap <- pheatmap(t(as.matrix(mean_ht)), cluster_row = FALSE, cluster_col = FALSE, 
+         cellheight = 25, main='Mean TF activity', gaps_col = 1,
+         fontsize = 17, fontsize_row = 12, fontsize_col = 12,
+         breaks = unique(seq(-max_num, max_num, length.out=100)))
+```
+
+```{r}
+mean_ht <- tibble(
+  func=rownames(tf_act_m),
+  `HEV+/late`=rowMeans(tf_act_m[,meta$type == 'HEV+/late']),
+  `HCV+/high`=rowMeans(tf_act_m[,meta$type == 'HCV+/high']),
+  `COVID+/PCR+`=rowMeans(tf_act_m[,meta$type == 'COVID+/PCR+']),
+) %>% column_to_rownames('func') %>% arrange(`COVID+/PCR+`)
+
+max_num <- max(abs(mean_ht))
+tf_heatmap <- pheatmap(t(as.matrix(mean_ht)), cluster_row = FALSE, cluster_col = FALSE, 
+         gaps_row=c(1,2,3), cellheight = 25, main='Mean TF activity', 
+         fontsize = 17, fontsize_row = 12, fontsize_col = 12,
+         breaks = unique(seq(-max_num, max_num, length.out=100)))
+```
+
+
+
+
+
+
+
+
+```{r}
+TS <- factor(meta$ifn, levels = c("healthy", "lowISG", "highISG"))
+ts_labels <- TS
+
+input_pca <- read_csv(file.path('..', 'results', dir, 'count_df_vsn.csv')) %>%
+  column_to_rownames('gene') %>% as.matrix()
+input_pca[is.na(input_pca)] <- 0
+pca_r <- prcomp(t(input_pca), center = TRUE, scale. = T)
+pca_df <- pca_r$x %>% as_tibble(rownames = "samples") %>% mutate(type=ts_labels)
+pca_plot <- pca_df %>% 
+  ggplot() + geom_point(aes(x = PC1, y = PC2, 
+                          color = type)) +
+  geom_text_repel(aes(x = PC1, y = PC2, 
+                          label = samples, color=type),show.legend = F) +
+  theme_classic() + ggtitle('PCA') + theme(text = element_text(size=20))
+
+custom.config = umap.defaults
+custom.config$random_state = 123
+proj.umap = umap(t(input_pca), config=custom.config)
+umap_df <- proj.umap[["layout"]]
+colnames(umap_df) <- c('UMAP1', 'UMAP2')
+umap_df <- umap_df %>% as_tibble() %>% mutate(type=ts_labels, samples=rownames(umap_df))
+umap_plot <- umap_df %>% 
+  ggplot() + geom_point(aes(x = UMAP1, y = UMAP2, 
+                          color = type)) +
+  geom_text_repel(aes(x = UMAP1, y = UMAP2, 
+                          label = samples, color=type), show.legend = F) +
+  theme_classic() + ggtitle('UMAP') + theme(text = element_text(size=20))
+```
+
+```{r}
+#TFs plots
+# Build lima model
+design <- model.matrix(~0+TS)
+colnames(design) <- levels(TS)
+eset <- read_csv(file.path('..', 'results', dir, 'tf_act.csv')) %>%
+  column_to_rownames('tf')
+fit <- lmFit(eset, design)
+cont.matrix <- makeContrasts(
+  lowISGvsheal=lowISG-healthy,
+  highISGvsheal=highISG-healthy,
+  Diff=(highISG-healthy)-(lowISG-healthy),
+  levels=design)
+fit2 <- contrasts.fit(fit, cont.matrix)
+model <- eBayes(fit2)
+
+t_names <- model$coefficients %>% colnames()
+sig_lst <- lapply(t_names, function(t_name){
+    df_plot <- get_plot_df(model, t_name) %>% filter(thr == 'sign') %>% 
+      select(func) %>% unlist()
+  })
+
+# Write tfs to file
+tf_to_file <- lapply(t_names, function(t_name){
+  get_plot_df(model, t_name) %>% filter(thr == 'sign') %>% 
+    select(-thr) %>%
+    mutate(order=t_name) %>%
+    rename('comp'=order) %>%
+    mutate(comp=ifelse(comp == 'lowISGvsheal', 'lowISG', comp)) %>%
+    mutate(comp=ifelse(comp == 'highISGvsheal', 'highISG', comp))
+}) %>% bind_rows()
+write_csv(tf_to_file, file.path('..', 'results', dir, 'sign_tfs.csv'))
+
+tf_volcano <- wrap_plots(limma_volcano(model), ncol = 3, nrow = 1)
+
+# Select only the significant TFs of the Difference comparison
+ht_df <- eset[sig_lst[[3]],]
+
+idx <- order(TS) # order samples
+idx_func <- order(rowMeans(ht_df[,TS == 'highISG'])) #order TFs by p.p
+ht_all_df <- as.matrix(ht_df[idx_func,idx])
+
+gaps_row <- rle(c(sort(TS)))$lengths[1:2]
+gaps_row <- c(gaps_row[1], sum(gaps_row))
+
+max_num <- max(abs(ht_all_df))
+tf_samples_ht <- pheatmap(t(ht_all_df), cluster_row = FALSE, cluster_col = FALSE,
+         gaps_row=gaps_row, main='TF activity per sample', 
+         fontsize = 17, fontsize_row = 12, fontsize_col = 12,
+         breaks = unique(seq(-max_num, max_num, length.out=100)))
+
+mean_ht <- tibble(
+  func=rownames(ht_df),
+  Healthy=rowMeans(ht_df[,TS == 'healthy']),
+  `lowISG`=rowMeans(ht_df[,TS == 'lowISG']),
+  `highISG`=rowMeans(ht_df[,TS == 'highISG'])
+) %>% column_to_rownames('func') %>% arrange(`highISG`)
+
+max_num <- max(abs(mean_ht))
+tf_heatmap <- pheatmap(t(as.matrix(mean_ht)), cluster_row = FALSE, cluster_col = FALSE, 
+         gaps_row=c(1,2,3), cellheight = 50, main='Mean TF activity', 
+         fontsize = 17, fontsize_row = 12, fontsize_col = 12,
+         breaks = unique(seq(-max_num, max_num, length.out=100)))
+```
+
+
+
+
+
+

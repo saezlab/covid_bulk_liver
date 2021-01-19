@@ -1,0 +1,286 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r warning=FALSE}
+library(org.Hs.eg.db)
+library(EnsDb.Hsapiens.v86)
+library(annotate)
+library(readxl)
+library(dplyr)
+library(ggplot2)
+library(reshape)
+library(pheatmap)
+library(gridExtra)
+library(grid)
+library(cowplot)
+library(ggrepel)
+library(hexbin)
+library(readr)
+library(vsn)
+library(limma)
+library(progeny)
+library(tibble)
+library(dorothea)
+library(staplr)
+library(ggrepel)
+library(patchwork)
+library(grid)
+library(limma)
+library(UpSetR)
+library(RColorBrewer)
+library(msigdbr)
+library(fgsea)
+library(clusterProfiler)
+library(umap)
+library(data.table)
+library(tidyverse)
+library(ggsignif)
+library(ggplotify)
+source("support_functions.R")
+```
+
+Generate signature Hepatotropic viruses
+
+```{r}
+dir <- 'HCV'
+
+fname <- 'GSE84346_annotation.xlsx'
+meta <- read_xlsx(file.path('..', 'data', dir, fname)) %>%
+  dplyr::select(SAMPLE, endogenous_ifn) %>% 
+  rename('sample'=SAMPLE, 'ifn'=endogenous_ifn) %>%
+  mutate(ifn=gsub(" ", "", ifn)) %>%
+  mutate(ifn=ifelse(ifn == 'NA', "healthy", ifn)) %>%
+  #dplyr::filter(ifn != 'low ISG') %>%
+  arrange(sample)
+
+fname <- 'GSE84346_log2RPKM.xlsx'
+df <- read_xlsx(file.path('..', 'data', dir, fname))
+df$gene <- getSYMBOL(df$entrezid, data='org.Hs.eg') %>% unlist() %>% unname
+df <- df %>% dplyr::filter(!is.na(gene)) %>% 
+  dplyr::select(-entrezid) %>%
+  dplyr::select(gene, meta$sample)
+
+gene_names <- rownames(df)
+
+path <- file.path("..", "results", dir)
+dir.create(path, showWarnings = FALSE, recursive = T)
+write_csv(df, file.path(path, "count_df_vsn.csv"))
+run_tf(dir)
+```
+
+```{r}
+dir <- 'HEV'
+
+fname <- 'GSE135619_annotation.xlsx'
+meta <- read_xlsx(file.path('..', 'data', dir, fname)) %>% 
+  dplyr::filter(V4=='PBS') %>% 
+  rename('sample'=V0, 'type'=V6) %>% 
+  dplyr::select(sample, type) %>%
+  arrange(sample)
+
+fname <- 'GSE135619_log2TPM.xlsx'
+df <- read_xlsx(file.path('..', 'data', dir, fname))
+df$gene <- getSYMBOL(df$entrezid, data='org.Hs.eg') %>% unlist() %>% unname
+df <- df %>% dplyr::filter(!is.na(gene)) %>% 
+  dplyr::select(-entrezid) %>%
+  dplyr::select(gene, meta$sample)
+
+gene_names <- rownames(df)
+
+path <- file.path("..", "results", dir)
+dir.create(path, showWarnings = FALSE, recursive = T)
+write_csv(df, file.path(path, "count_df_vsn.csv"))
+run_tf(dir)
+```
+
+```{r}
+# Get COVID signature
+covid_sign <- read_csv(file.path('..','results','liver','sign_tfs.csv')) %>%
+  dplyr::filter(pvals < 0.05, comp=='Diff') %>% dplyr::select(func, coef) %>% 
+  column_to_rownames('func')
+
+# Open all TFs act and concatenate them
+tf_act_m <- read_csv(file.path('..','results','liver','tf_act.csv')) %>%
+  column_to_rownames('tf')
+tf_act_m <- as.matrix(tf_act_m[rownames(covid_sign),])
+
+#HEV
+temp_m <- read_csv(file.path('..','results','HEV','tf_act.csv')) %>%
+  column_to_rownames('tf')
+temp_m <- as.matrix(temp_m[rownames(covid_sign),])
+tf_act_m <- cbind(tf_act_m, temp_m)
+
+#HCV
+temp_m <- read_csv(file.path('..','results','HCV','tf_act.csv')) %>%
+  column_to_rownames('tf')
+temp_m <- as.matrix(temp_m[rownames(covid_sign),])
+tf_act_m <- cbind(tf_act_m, temp_m)
+
+# Concatenate metas
+meta <- read_csv("../data/raw/liver/meta.csv", col_names = T) %>% 
+  arrange(sample) %>% mutate(COVID=ifelse(COVID=='p', 'COVID+', 'COVID-'),
+                             PCR=ifelse(PCR=='p', 'PCR+', 'PCR-')) %>%
+  mutate(type=paste(COVID, PCR, sep="/")) %>%
+  dplyr::select(sample, type) %>% mutate(group='COVID')
+
+temp_meta <- read_xlsx(file.path('..', 'data', 'HEV', 'GSE135619_annotation.xlsx')) %>%
+  dplyr::filter(V4=='PBS') %>% 
+  rename('sample'=V0, 'type'=V6) %>% 
+  dplyr::select(sample, type) %>%
+  arrange(sample) %>% mutate(group='HEV')
+
+meta <- rbind(meta, temp_meta)
+
+temp_meta <- read_xlsx(file.path('..', 'data', 'HCV', 'GSE84346_annotation.xlsx')) %>%
+  dplyr::select(sample, type) %>% 
+  arrange(sample) %>% mutate(group='HCV')
+meta <- rbind(meta, temp_meta)
+
+meta$type <- factor(meta$type, levels = c('COVID-/PCR-',
+                                          'HEV-/early',
+                                          'HCV-',
+                                          'HEV-/late',
+                                          'HCV+/low',
+                                          'HEV+/early',
+                                          'COVID+/PCR-',
+                                          'HEV+/late',
+                                          'HCV+/high',
+                                          'COVID+/PCR+'))
+```
+
+```{r}
+cos_sim <- function(a,b){
+  sim <- (a %*% b) / (sqrt(sum(a^2)) * sqrt(sum(b^2)))
+  return(sim)
+}
+```
+
+```{r}
+# Plot heatmap all modes TF mean
+mean_ht <- tibble(
+  func=rownames(tf_act_m),
+  `HEV-/early`=rowMeans(tf_act_m[,meta$type == 'HEV-/early']),
+  `HEV-/late`=rowMeans(tf_act_m[,meta$type == 'HEV-/late']),
+  `HEV+/early`=rowMeans(tf_act_m[,meta$type == 'HEV+/early']),
+  `HEV+/late`=rowMeans(tf_act_m[,meta$type == 'HEV+/late']),
+  `HCV-`=rowMeans(tf_act_m[,meta$type == 'HCV-']),
+  `HCV+/low`=rowMeans(tf_act_m[,meta$type == 'HCV+/low']),
+  `HCV+/high`=rowMeans(tf_act_m[,meta$type == 'HCV+/high']),
+  `COVID-/PCR-`=rowMeans(tf_act_m[,meta$type == 'COVID-/PCR-']),
+  `COVID+/PCR-`=rowMeans(tf_act_m[,meta$type == 'COVID+/PCR-']),
+  `COVID+/PCR+`=rowMeans(tf_act_m[,meta$type == 'COVID+/PCR+']),
+) %>% column_to_rownames('func') %>% arrange(`COVID+/PCR+`)
+
+cos_sims <- lapply(colnames(mean_ht), function(col){
+  cos_sim(unlist(mean_ht[,col]), unlist(mean_ht$`COVID+/PCR+`))
+}) %>% unlist()
+print(sort(cos_sims))
+
+mean_ht <- as.matrix(mean_ht)[,order(cos_sims)]
+
+max_num <- max(abs(mean_ht))
+tf_heatmap <- pheatmap(t(as.matrix(mean_ht)), cluster_row = FALSE, cluster_col = FALSE, 
+                       main="Mean TF activity", cellheight = 25, fontsize = 17, 
+                       fontsize_row = 12, fontsize_col = 12, 
+                       breaks = unique(seq(-max_num, max_num, length.out=100)))
+
+cos_sim_df <- tibble(sample=colnames(mean_ht), sims=sort(cos_sims))
+write_csv(cos_sim_df,file.path('..','results','sims_hepa.csv'))
+
+```
+
+
+```{r}
+dir <- 'organoids'
+
+org_df <- read_tsv(file.path('..','data','organoids','200716_TPM_norm_10e6.txt')) %>%
+  dplyr::select(-Row.names, -external_gene_name)
+
+symbols <- ensembldb::select(EnsDb.Hsapiens.v86, keys= org_df$GeneID, keytype = "GENEID", columns = c("SYMBOL","GENEID")) %>% column_to_rownames('GENEID')
+
+org_df$gene <- symbols[org_df$GeneID,]
+org_df <- org_df %>% dplyr::filter(!is.na(gene))
+org_df$sums <- org_df %>% dplyr::select(-GeneID, -gene) %>% rowSums()
+org_df <- org_df %>% dplyr::filter(sums > 5) %>% 
+  distinct(gene, .keep_all = TRUE) %>%
+  dplyr::select(-GeneID, -sums)
+
+path <- file.path("..", "results", dir)
+dir.create(path, showWarnings = FALSE, recursive = T)
+write_csv(org_df, file.path(path, "count_df_vsn.csv"))
+run_tf(dir)
+
+covid_sign <- read_csv(file.path('..','results','liver','sign_tfs.csv')) %>%
+  dplyr::filter(pvals < 0.05, comp=='Diff') %>% dplyr::select(func, coef) %>% 
+  column_to_rownames('func')
+
+# Open all TFs act and concatenate them
+tf_act_m <- read_csv(file.path('..','results','liver','tf_act.csv')) %>%
+  column_to_rownames('tf')
+tf_act_m <- as.matrix(tf_act_m[rownames(covid_sign),])
+
+#Organoids
+temp_m <- read_csv(file.path('..','results','organoids','tf_act.csv')) %>%
+  column_to_rownames('tf')
+temp_m <- as.matrix(temp_m[rownames(covid_sign),])
+tf_act_m <- cbind(tf_act_m, temp_m)
+
+# Concatenate metas
+meta <- read_csv("../data/raw/liver/meta.csv", col_names = T) %>% 
+  arrange(sample) %>% mutate(COVID=ifelse(COVID=='p', 'COVID+', 'COVID-'),
+                             PCR=ifelse(PCR=='p', 'PCR+', 'PCR-')) %>%
+  mutate(type=paste(COVID, PCR, sep="/")) %>%
+  dplyr::select(sample, type) %>% mutate(group='COVID')
+
+temp_meta <- tibble(sample=colnames(dplyr::select(org_df, -gene)))
+temp_meta$type <- lapply(temp_meta$sample, function(col_name){
+  splitted <- str_split(col_name, "_")[[1]]
+  return(paste0(splitted[3],"_",splitted[4]))
+}) %>% unlist()
+temp_meta <- temp_meta %>% arrange(sample) %>% mutate(group='Organoids')
+
+meta <- rbind(meta, temp_meta)
+
+mean_ht <- tibble(
+  func=rownames(tf_act_m),
+  `Ctrl_ni`=rowMeans(tf_act_m[,meta$type == 'Ctrl_ni']),
+  `Ctrl_inf`=rowMeans(tf_act_m[,meta$type == 'Ctrl_inf']),
+  `Bminus_ni`=rowMeans(tf_act_m[,meta$type == 'Bminus_ni']),
+  `Bminus_inf`=rowMeans(tf_act_m[,meta$type == 'Bminus_inf']),
+  `Bplus_inf`=rowMeans(tf_act_m[,meta$type == 'Bplus_inf']),
+  `COVID-/PCR-`=rowMeans(tf_act_m[,meta$type == 'COVID-/PCR-']),
+  `COVID+/PCR-`=rowMeans(tf_act_m[,meta$type == 'COVID+/PCR-']),
+  `COVID+/PCR+`=rowMeans(tf_act_m[,meta$type == 'COVID+/PCR+']),
+) %>% column_to_rownames('func') %>% arrange(`COVID+/PCR+`)
+
+cos_sims <- lapply(colnames(mean_ht), function(col){
+  cos_sim(unlist(mean_ht[,col]), unlist(mean_ht$`COVID+/PCR+`))
+}) %>% unlist()
+
+mean_ht <- as.matrix(mean_ht)[,order(cos_sims)]
+print(sort(cos_sims))
+
+max_num <- max(abs(mean_ht))
+tf_orrgs_heatmap <- pheatmap(t(as.matrix(mean_ht)), cluster_row = FALSE, cluster_col = FALSE, 
+         cellheight = 25, main='Mean TF activity',
+         fontsize = 17, fontsize_row = 12, fontsize_col = 12,
+         breaks = unique(seq(-max_num, max_num, length.out=100)))
+
+cos_sim_df <- tibble(sample=colnames(mean_ht), sims=sort(cos_sims))
+write_csv(cos_sim_df,file.path('..','results','sims_orgs.csv'))
+```
+```{r}
+pdf(file = file.path('..', 'results', "tf_sign.pdf"),
+    width = 10, # The width of the plot in inches
+    height = 6) # The height of the plot in inches
+
+plot.new()
+tf_heatmap
+
+plot.new()
+tf_orrgs_heatmap
+
+dev.off()
+```

@@ -1,1 +1,4 @@
 data/
+.Rproj.user
+.Rhistory
+scripts/*nb.html

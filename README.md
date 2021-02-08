@@ -1,2 +1,15 @@
-# covid_bulk_liver
-Functional analysis of Liver samples from COVID patients
+# Wanner N, Andrieux G et al. A molecular roadmap for potential long-term hepatic sequelae in patients with severe COVID-19
+## Functional analysis of liver samples with severe COVID-19
+
+Functional analysis was performed using DoRothEA package for Transcript factor (TF) activity and PROGENy package for pathway activity [1,2,3]. TFs and Pathway activities were computed using SDmean normalized counts [4]. To test difference in activities, a factorial experiment was designed using limma package for each modality [5]. In both functional types, the first factor was the infection status of the patient (COVID+/COVID-), and the second was if there were traces of the virus in its liver (PCR+/PCR-). Thus, in total there were 3 factor combinations: a healthy patient (COVID-/PCR-), an early stage infection (COVID+/PCR-) and a late stage infection (COVID+/PCR+). A linear model was fitted for each TF and pathway activity to obtain coefficients for each factorial combination. Then, this coefficients were used to compute three contrasts: effect of COVID+/PCR- based on COVID-/PCR- samples, effects of COVID+/PCR+ based on COVID-/PCR- samples and the difference between these two comparisons. The first and second contrast aim to detect systematic changes in activity when an early or late stage COVID infection is taking place. However, the third contrast aims to detect the specific difference in activity between a late stage infection and an early stage infection. The sign of the obtained coefficients can be interpreted as an increase or decrease of the mean activity for a given comparison, each with an associated probability.  
+
+From the significant TFs and Pathways in the difference contrast, the union of their annotated genes (genes targeted by each regulon for TFs, and responsive genes for Pathways) were extracted to perform gene set enrichment analysis (GSE) against the canonical pathways of MSIGDB [6]. Two GSE were performed, one for the positive and another for the negative activities, thus checking what biological processes are being up-regulated or down-regulated.
+
+Finally, a comparison between different hepatotropic viruses signatures was performed. For each virus a TF signature was computed and then compared by cosine similarity to the reference COVID+/PCR+ TF singature. 
+
+1. Garcia-Alonso L, Holland CH, Ibrahim MM, Turei D, Saez-Rodriguez J. Benchmark and integration of resources for the estimation of human transcription factor activities. Genome Res. 2019;29(8):1363-75.
+2. Alvarez MJ, Shen Y, Giorgi FM, et al. Functional characterization of somatic mutations in cancer using network-based inference of protein activity. Nat Genet. 2016;48(8):838-47.
+3. Schubert M, Klinger B, Klünemann M, et al. Perturbation-response genes reveal signaling footprints in cancer gene expression. Nat Commun. 2018;9(1).
+4. Huber W, von Heydebreck A, Sultmann H, Poustka A, Vingron M. Variance stabilization applied to microarray data calibration and to the quantification of differential expression. Bioinformatics. 2002;18(Suppl 1):S96-S104.
+5. Ritchie ME, Phipson B, Wu D, et al. limma powers differential expression analyses for RNA-sequencing and microarray studies. Nucleic Acids Research. 2015;43(7):e47.
+6. Subramanian A, Tamayo P, Mootha VK, et al. Gene set enrichment analysis: A knowledge-based approach for interpreting genome-wide expression profiles. Proceedings of the National Academy of Sciences. 2005;102(43):15545-50.
